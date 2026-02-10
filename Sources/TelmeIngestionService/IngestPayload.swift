@@ -75,7 +75,7 @@ extension IngestPayload {
 		var records: [RecordRow] = []
 		for (index, item) in arr.enumerated() {
 			do {
-				let row = try RecordRow.parse(item, sessionId: session.sessionId)
+				let row = try RecordRow.parse(item, session: session)
 				records.append(row)
 			} catch {
 				throw IngestParseError.invalidRecord(index, String(describing: error))
@@ -131,40 +131,84 @@ extension SessionRow {
 }
 
 extension RecordRow {
-	static func parse(_ recordJson: JSON, sessionId: String) throws -> RecordRow {
+	/// Parses a record from JSON. Accepts snake_case (ingest shape) or camelCase (TelmeRecord-encoded).
+	static func parse(_ recordJson: JSON, session: SessionRow) throws -> RecordRow {
 		guard case .object(let o) = recordJson else {
 			throw IngestParseError.invalidRecord(0, "record must be an object")
 		}
-		func u64(_ key: String) throws -> UInt64 {
-			guard let v = o[key] else { throw IngestParseError.invalidRecord(0, "record missing '\(key)'") }
+		func get(_ snake: String, _ camel: String) -> JSON? {
+			o[snake] ?? o[camel]
+		}
+		func u64(from v: JSON?) throws -> UInt64 {
+			guard let v else { throw IngestParseError.invalidRecord(0, "missing value") }
 			switch v {
 			case .int(let i): return UInt64(bitPattern: Int64(i))
 			case .double(let d): return UInt64(d)
 			case .string(let s): return UInt64(s) ?? 0
-			default: throw IngestParseError.invalidRecord(0, "record.\(key) must be number")
+			default: throw IngestParseError.invalidRecord(0, "expected number")
 			}
 		}
-		func str(_ key: String) throws -> String {
-			guard let v = o[key] else { throw IngestParseError.invalidRecord(0, "record missing '\(key)'") }
-			if case .string(let s) = v { return s }
-			throw IngestParseError.invalidRecord(0, "record.\(key) must be string")
+		func u64Key(snake: String, camel: String) throws -> UInt64 {
+			try u64(from: get(snake, camel))
 		}
-		func json(_ key: String) throws -> JSON {
-			guard let v = o[key] else { throw IngestParseError.invalidRecord(0, "record missing '\(key)'") }
+		func strKey(snake: String, camel: String) throws -> String {
+			guard let v = get(snake, camel), case .string(let s) = v else {
+				throw IngestParseError.invalidRecord(0, "record missing '\(snake)' or '\(camel)'")
+			}
+			return s
+		}
+		func jsonKey(snake: String, camel: String) throws -> JSON {
+			guard let v = get(snake, camel) else {
+				throw IngestParseError.invalidRecord(0, "record missing '\(snake)' or '\(camel)'")
+			}
 			return v
 		}
-		let sid = (try? str("session_id")) ?? sessionId
+		func monoNanos(from v: JSON?) -> UInt64? {
+			guard let v else { return nil }
+			if case .object(let obj) = v, let mono = obj["monotonic_nanos"] {
+				return (try? u64(from: mono))
+			}
+			return (try? u64(from: v))
+		}
+		let sid = (try? strKey(snake: "session_id", camel: "sessionId")) ?? session.sessionId
+		let recordId = try u64Key(snake: "record_id", camel: "recordId")
+		let kind = try strKey(snake: "kind", camel: "kind")
+		let eventInfoJson = get("event_info", "eventInfo")
+		let timestampJson = get("timestamp", "timestamp")
+		let eventMonoNanos: UInt64 = try {
+			if let v = get("event_mono_nanos", "eventMonoNanos") { return try u64(from: v) }
+			if let info = eventInfoJson, case .object(let infoObj) = info, let ts = infoObj["timestamp"] {
+				if let n = monoNanos(from: ts) { return n }
+			}
+			throw IngestParseError.invalidRecord(0, "record missing event_mono_nanos / event_info.timestamp")
+		}()
+		let recordMonoNanos: UInt64 = try {
+			if let v = get("record_mono_nanos", "recordMonoNanos") { return try u64(from: v) }
+			if let n = monoNanos(from: timestampJson) { return n }
+			throw IngestParseError.invalidRecord(0, "record missing record_mono_nanos / timestamp")
+		}()
+		let sendMonoNanos = try u64Key(snake: "send_mono_nanos", camel: "sendMonoNanos")
+		let eventWallNanos: UInt64 = try {
+			if let v = get("event_wall_nanos", "eventWallNanos") { return try u64(from: v) }
+			let delta = eventMonoNanos >= session.baselineMonoNanos
+				? (eventMonoNanos - session.baselineMonoNanos)
+				: 0
+			return session.baselineWallNanos + delta
+		}()
+		let event = try jsonKey(snake: "event", camel: "event")
+		let eventInfo = try jsonKey(snake: "event_info", camel: "eventInfo")
+		let correlation = try jsonKey(snake: "correlation", camel: "correlation")
 		return RecordRow(
 			sessionId: sid,
-			recordId: try u64("record_id"),
-			kind: try str("kind"),
-			eventMonoNanos: try u64("event_mono_nanos"),
-			recordMonoNanos: try u64("record_mono_nanos"),
-			sendMonoNanos: try u64("send_mono_nanos"),
-			eventWallNanos: try u64("event_wall_nanos"),
-			event: try json("event"),
-			eventInfo: try json("event_info"),
-			correlation: try json("correlation")
+			recordId: recordId,
+			kind: kind,
+			eventMonoNanos: eventMonoNanos,
+			recordMonoNanos: recordMonoNanos,
+			sendMonoNanos: sendMonoNanos,
+			eventWallNanos: eventWallNanos,
+			event: event,
+			eventInfo: eventInfo,
+			correlation: correlation
 		)
 	}
 }
@@ -172,7 +216,6 @@ extension RecordRow {
 // MARK: - JSONEachRow for ClickHouse
 
 extension SessionRow {
-	/// Single line of JSON for INSERT INTO app_sessions FORMAT JSONEachRow. UInt64 nanos sent as strings for precision.
 	func toJSONEachRow() throws -> Data {
 		let obj: JSON = .object([
 			"session_id": .string(sessionId),
@@ -189,13 +232,12 @@ extension SessionRow {
 			"send_mono_nanos": .string(String(sendMonoNanos)),
 		])
 		var data = try obj.toData(prettyPrinted: false)
-		data.append(0x0a) // newline
+		data.append(0x0a)
 		return data
 	}
 }
 
 extension RecordRow {
-	/// One line of JSON for INSERT INTO records FORMAT JSONEachRow. UInt64 nanos sent as strings for precision.
 	func toJSONEachRow() throws -> Data {
 		let obj: JSON = .object([
 			"session_id": .string(sessionId),

@@ -35,6 +35,7 @@ final class IngestHandler: ChannelInboundHandler, @unchecked Sendable {
 		case .body(var buf):
 			if var buffer = bodyBuffer {
 				if buffer.readableBytes + buf.readableBytes > maxBodySize {
+					Self.logResponse(status: .payloadTooLarge, body: "{\"error\":\"body too large\"}", remote: context.channel.remoteAddress)
 					respond(context: context, status: .payloadTooLarge, body: "{\"error\":\"body too large\"}")
 					return
 				}
@@ -48,20 +49,25 @@ final class IngestHandler: ChannelInboundHandler, @unchecked Sendable {
 
 	private func handleRequest(context: ChannelHandlerContext) {
 		guard let head = requestHead else {
+			Self.logResponse(status: .badRequest, body: "{\"error\":\"missing request\"}", remote: context.channel.remoteAddress)
 			respond(context: context, status: .badRequest, body: "{\"error\":\"missing request\"}")
 			return
 		}
 		guard head.method == .POST, head.uri == "/telme/ingest" else {
+			Self.logResponse(status: .notFound, body: "{\"error\":\"not found\"}", remote: context.channel.remoteAddress)
 			respond(context: context, status: .notFound, body: "{\"error\":\"not found\"}")
 			return
 		}
 		guard let buffer = bodyBuffer, buffer.readableBytes > 0 else {
+			Self.logResponse(status: .badRequest, body: "{\"error\":\"empty body\"}", remote: context.channel.remoteAddress)
 			respond(context: context, status: .badRequest, body: "{\"error\":\"empty body\"}")
 			return
 		}
 		let bodyData = Data(buffer.readableBytesView)
 		requestHead = nil
 		bodyBuffer = nil
+
+		Self.logRequest(method: head.method.rawValue, uri: head.uri, bodyBytes: bodyData.count, headers: head.headers, remote: context.channel.remoteAddress)
 
 		// Parse and insert on a task; then respond via channel (no capture of self in Task)
 		let channel = context.channel
@@ -70,7 +76,9 @@ final class IngestHandler: ChannelInboundHandler, @unchecked Sendable {
 			let result: (HTTPResponseStatus, String)
 			do {
 				let json = try JSON.parse(bodyData)
+				Self.logRequestJSON(json)
 				let payload = try IngestPayload.parse(json)
+				Self.logPayload(sessionId: payload.session.sessionId, recordsCount: payload.records.count)
 				try await client.insertAppSession(body: payload.session.toJSONEachRow())
 				if !payload.records.isEmpty {
 					var recordsData = Data()
@@ -88,8 +96,45 @@ final class IngestHandler: ChannelInboundHandler, @unchecked Sendable {
 			} catch {
 				result = (.internalServerError, Self.errorJSON(error.localizedDescription))
 			}
+			Self.logResponse(status: result.0, body: result.1, remote: channel.remoteAddress)
 			Self.respond(channel: channel, status: result.0, body: result.1)
 		}
+	}
+
+	// MARK: - Logging
+
+	private static func logRequest(method: String, uri: String, bodyBytes: Int, headers: HTTPHeaders, remote: SocketAddress?) {
+		let remoteStr = remote.map { "\($0)" } ?? "?"
+		let contentLength = headers["content-length"].first ?? "-"
+		print("[Ingest] \(Self.timestamp()) REQUEST \(method) \(uri) remote=\(remoteStr) body_bytes=\(bodyBytes) content_length_header=\(contentLength)")
+	}
+
+	private static func logRequestJSON(_ json: JSON) {
+		guard let data = try? json.toData(prettyPrinted: false),
+			  let s = String(data: data, encoding: .utf8) else { return }
+		print("[Ingest] \(Self.timestamp()) REQUEST_JSON \(s)")
+	}
+
+	private static func logPayload(sessionId: String, recordsCount: Int) {
+		print("[Ingest] \(Self.timestamp()) PAYLOAD session_id=\(sessionId) records_count=\(recordsCount)")
+	}
+
+	private static func logResponse(status: HTTPResponseStatus, body: String, remote: SocketAddress?) {
+		let remoteStr = remote.map { "\($0)" } ?? "?"
+		let code = status.code
+		let bodyBytes = body.utf8.count
+		if code >= 400 {
+			let errorSnippet = body.prefix(200).replacingOccurrences(of: "\n", with: " ")
+			print("[Ingest] \(Self.timestamp()) RESPONSE status=\(code) body_bytes=\(bodyBytes) remote=\(remoteStr) error=\(errorSnippet)")
+		} else {
+			print("[Ingest] \(Self.timestamp()) RESPONSE status=\(code) body_bytes=\(bodyBytes) remote=\(remoteStr)")
+		}
+	}
+
+	private static func timestamp() -> String {
+		let formatter = ISO8601DateFormatter()
+		formatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+		return formatter.string(from: Date())
 	}
 
 	private func respond(context: ChannelHandlerContext, status: HTTPResponseStatus, body: String) {
