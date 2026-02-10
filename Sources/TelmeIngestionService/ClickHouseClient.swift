@@ -13,12 +13,20 @@ final class ClickHouseClient: @unchecked Sendable {
 	private let baseURL: URL
 	private let session: URLSession
 	private let database: String
+	private let authHeader: String?
 
-	/// baseURL: e.g. http://127.0.0.1:8123
-	init(baseURL: URL, database: String = "telme", session: URLSession = .shared) {
+	/// baseURL: e.g. http://127.0.0.1:8123. user/password: optional; when set, sends Basic auth (fixes 401).
+	init(baseURL: URL, database: String = "telme", user: String? = nil, password: String? = nil, session: URLSession = .shared) {
 		self.baseURL = baseURL
 		self.database = database
 		self.session = session
+		if let user, let password, !user.isEmpty {
+			let cred = "\(user):\(password)"
+			let data = cred.data(using: .utf8)!
+			self.authHeader = "Basic \(data.base64EncodedString())"
+		} else {
+			self.authHeader = nil
+		}
 	}
 
 	/// Inserts one row into telme.app_sessions. Body must be one line of JSON (JSONEachRow).
@@ -27,6 +35,7 @@ final class ClickHouseClient: @unchecked Sendable {
 		var request = URLRequest(url: url)
 		request.httpMethod = "POST"
 		request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+		if let authHeader { request.setValue(authHeader, forHTTPHeaderField: "Authorization") }
 		request.httpBody = body
 		let (_, response) = try await data(for: request)
 		guard let http = response as? HTTPURLResponse else { return }
@@ -42,6 +51,7 @@ final class ClickHouseClient: @unchecked Sendable {
 		var request = URLRequest(url: url)
 		request.httpMethod = "POST"
 		request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+		if let authHeader { request.setValue(authHeader, forHTTPHeaderField: "Authorization") }
 		request.httpBody = body
 		let (data, response) = try await data(for: request)
 		guard let http = response as? HTTPURLResponse else { return }

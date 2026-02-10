@@ -4,6 +4,7 @@
 //
 //  HTTP server: POST /telme/ingest → ClickHouse (database: telme).
 //  Env: CLICKHOUSE_DSN (default http://127.0.0.1:8123), PORT (default 8080).
+//  Optional: CLICKHOUSE_USER, CLICKHOUSE_PASSWORD for Basic auth (required if ClickHouse has auth).
 //
 
 import Foundation
@@ -13,12 +14,14 @@ import NIOPosix
 
 let clickHouseDSN = ProcessInfo.processInfo.environment["CLICKHOUSE_DSN"] ?? "http://127.0.0.1:8123"
 let port = Int(ProcessInfo.processInfo.environment["PORT"] ?? "8080") ?? 8080
+let clickHouseUser = ProcessInfo.processInfo.environment["CLICKHOUSE_USER"] ?? "default"
+let clickHousePassword = ProcessInfo.processInfo.environment["CLICKHOUSE_PASSWORD"] ?? "."
 
 guard let baseURL = URL(string: clickHouseDSN) else {
 	fatalError("Invalid CLICKHOUSE_DSN: \(clickHouseDSN)")
 }
 
-let clickHouse = ClickHouseClient(baseURL: baseURL, database: "telme")
+let clickHouse = ClickHouseClient(baseURL: baseURL, database: "telme", user: clickHouseUser, password: clickHousePassword)
 
 let group = MultiThreadedEventLoopGroup(numberOfThreads: System.coreCount)
 defer { try? group.syncShutdownGracefully() }
