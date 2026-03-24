@@ -18,6 +18,9 @@ CLICKHOUSE_DSN=http://127.0.0.1:8123 PORT=8080 .build/debug/TelmeIngestionServic
 
 - **CLICKHOUSE_DSN** (default: `http://127.0.0.1:8123`) – ClickHouse HTTP endpoint.
 - **PORT** (default: `8080`) – Bind address `0.0.0.0:PORT`.
+- **CLICKHOUSE_USER**, **CLICKHOUSE_PASSWORD** (optional) - Basic auth credentials for ClickHouse.
+- **CLICKHOUSE_ASYNC_INSERT** (default: `1`) - Enables server-side async insert buffering.
+- **CLICKHOUSE_WAIT_FOR_ASYNC_INSERT** (default: `1`) - Waits for async flush before returning success.
 
 ## API
 

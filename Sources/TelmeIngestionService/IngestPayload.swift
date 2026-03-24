@@ -56,6 +56,55 @@ enum IngestParseError: Error, Sendable {
 	case invalidRecord(Int, String)
 }
 
+private enum ParseUtil {
+	static func parseUInt64(_ value: JSON, field: String) throws -> UInt64 {
+		switch value {
+		case .int(let i):
+			guard i >= 0 else { throw IngestParseError.invalidSession("\(field) must be >= 0") }
+			return UInt64(i)
+		case .double(let d):
+			guard d.isFinite, d >= 0, d.rounded(.towardZero) == d else {
+				throw IngestParseError.invalidSession("\(field) must be a non-negative integer")
+			}
+			return UInt64(d)
+		case .string(let s):
+			let trimmed = s.trimmingCharacters(in: .whitespacesAndNewlines)
+			guard let n = UInt64(trimmed) else {
+				throw IngestParseError.invalidSession("\(field) must be a non-negative integer")
+			}
+			return n
+		default:
+			throw IngestParseError.invalidSession("\(field) must be a number")
+		}
+	}
+
+	static func parseInt32(_ value: JSON, field: String) throws -> Int32 {
+		switch value {
+		case .int(let i):
+			guard i >= Int(Int32.min), i <= Int(Int32.max) else {
+				throw IngestParseError.invalidSession("\(field) out of Int32 range")
+			}
+			return Int32(i)
+		case .double(let d):
+			guard d.isFinite, d.rounded(.towardZero) == d else {
+				throw IngestParseError.invalidSession("\(field) must be an integer")
+			}
+			guard d >= Double(Int32.min), d <= Double(Int32.max) else {
+				throw IngestParseError.invalidSession("\(field) out of Int32 range")
+			}
+			return Int32(d)
+		case .string(let s):
+			let trimmed = s.trimmingCharacters(in: .whitespacesAndNewlines)
+			guard let n = Int32(trimmed) else {
+				throw IngestParseError.invalidSession("\(field) must be an Int32 integer")
+			}
+			return n
+		default:
+			throw IngestParseError.invalidSession("\(field) must be a number")
+		}
+	}
+}
+
 extension IngestPayload {
 	/// Parses JSON body into session + records. Accepts snake_case (and optionally camelCase) keys.
 	static func parse(_ json: JSON) throws -> IngestPayload {
@@ -97,21 +146,11 @@ extension SessionRow {
 		}
 		func u64(_ key: String) throws -> UInt64 {
 			guard let v = o[key] else { throw IngestParseError.invalidSession("session missing '\(key)'") }
-			switch v {
-			case .int(let i): return UInt64(bitPattern: Int64(i))
-			case .double(let d): return UInt64(d)
-			case .string(let s): return UInt64(s.trimmingCharacters(in: .whitespaces)) ?? 0
-			default: throw IngestParseError.invalidSession("session.\(key) must be number")
-			}
+			return try ParseUtil.parseUInt64(v, field: "session.\(key)")
 		}
 		func i32(_ key: String) throws -> Int32 {
 			guard let v = o[key] else { throw IngestParseError.invalidSession("session missing '\(key)'") }
-			switch v {
-			case .int(let i): return Int32(i)
-			case .double(let d): return Int32(d)
-			case .string(let s): return Int32(s) ?? 0
-			default: throw IngestParseError.invalidSession("session.\(key) must be number")
-			}
+			return try ParseUtil.parseInt32(v, field: "session.\(key)")
 		}
 		return SessionRow(
 			sessionId: try str("session_id"),
@@ -139,17 +178,24 @@ extension RecordRow {
 		func get(_ snake: String, _ camel: String) -> JSON? {
 			o[snake] ?? o[camel]
 		}
-		func u64(from v: JSON?) throws -> UInt64 {
-			guard let v else { throw IngestParseError.invalidRecord(0, "missing value") }
-			switch v {
-			case .int(let i): return UInt64(bitPattern: Int64(i))
-			case .double(let d): return UInt64(d)
-			case .string(let s): return UInt64(s) ?? 0
-			default: throw IngestParseError.invalidRecord(0, "expected number")
+		func u64(from v: JSON?, field: String) throws -> UInt64 {
+			guard let v else { throw IngestParseError.invalidRecord(0, "missing \(field)") }
+			do {
+				return try ParseUtil.parseUInt64(v, field: field)
+			} catch let e as IngestParseError {
+				throw e
+			} catch {
+				throw IngestParseError.invalidRecord(0, "\(field) must be a non-negative integer")
 			}
 		}
 		func u64Key(snake: String, camel: String) throws -> UInt64 {
-			try u64(from: get(snake, camel))
+			do {
+				return try u64(from: get(snake, camel), field: "record.\(snake)")
+			} catch let e as IngestParseError {
+				throw e
+			} catch {
+				throw IngestParseError.invalidRecord(0, "record invalid '\(snake)'/'\(camel)'")
+			}
 		}
 		func strKey(snake: String, camel: String) throws -> String {
 			guard let v = get(snake, camel), case .string(let s) = v else {
@@ -166,9 +212,9 @@ extension RecordRow {
 		func monoNanos(from v: JSON?) -> UInt64? {
 			guard let v else { return nil }
 			if case .object(let obj) = v, let mono = obj["monotonic_nanos"] {
-				return (try? u64(from: mono))
+				return (try? u64(from: mono, field: "record.monotonic_nanos"))
 			}
-			return (try? u64(from: v))
+			return (try? u64(from: v, field: "record.timestamp"))
 		}
 		let sid = (try? strKey(snake: "session_id", camel: "sessionId")) ?? session.sessionId
 		let recordId = try u64Key(snake: "record_id", camel: "recordId")
@@ -176,20 +222,20 @@ extension RecordRow {
 		let eventInfoJson = get("event_info", "eventInfo")
 		let timestampJson = get("timestamp", "timestamp")
 		let eventMonoNanos: UInt64 = try {
-			if let v = get("event_mono_nanos", "eventMonoNanos") { return try u64(from: v) }
+			if let v = get("event_mono_nanos", "eventMonoNanos") { return try u64(from: v, field: "record.event_mono_nanos") }
 			if let info = eventInfoJson, case .object(let infoObj) = info, let ts = infoObj["timestamp"] {
 				if let n = monoNanos(from: ts) { return n }
 			}
 			throw IngestParseError.invalidRecord(0, "record missing event_mono_nanos / event_info.timestamp")
 		}()
 		let recordMonoNanos: UInt64 = try {
-			if let v = get("record_mono_nanos", "recordMonoNanos") { return try u64(from: v) }
+			if let v = get("record_mono_nanos", "recordMonoNanos") { return try u64(from: v, field: "record.record_mono_nanos") }
 			if let n = monoNanos(from: timestampJson) { return n }
 			throw IngestParseError.invalidRecord(0, "record missing record_mono_nanos / timestamp")
 		}()
 		let sendMonoNanos = try u64Key(snake: "send_mono_nanos", camel: "sendMonoNanos")
 		let eventWallNanos: UInt64 = try {
-			if let v = get("event_wall_nanos", "eventWallNanos") { return try u64(from: v) }
+			if let v = get("event_wall_nanos", "eventWallNanos") { return try u64(from: v, field: "record.event_wall_nanos") }
 			let delta = eventMonoNanos >= session.baselineMonoNanos
 				? (eventMonoNanos - session.baselineMonoNanos)
 				: 0
@@ -241,7 +287,7 @@ extension RecordRow {
 	func toJSONEachRow() throws -> Data {
 		let obj: JSON = .object([
 			"session_id": .string(sessionId),
-			"record_id": .int(Int(truncatingIfNeeded: recordId)),
+			"record_id": .string(String(recordId)),
 			"kind": .string(kind),
 			"event_mono_nanos": .string(String(eventMonoNanos)),
 			"record_mono_nanos": .string(String(recordMonoNanos)),

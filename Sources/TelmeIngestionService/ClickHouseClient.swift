@@ -14,12 +14,24 @@ final class ClickHouseClient: @unchecked Sendable {
 	private let session: URLSession
 	private let database: String
 	private let authHeader: String?
+	private let asyncInsert: Bool
+	private let waitForAsyncInsert: Bool
 
 	/// baseURL: e.g. http://127.0.0.1:8123. user/password: optional; when set, sends Basic auth (fixes 401).
-	init(baseURL: URL, database: String = "telme", user: String? = nil, password: String? = nil, session: URLSession = .shared) {
+	init(
+		baseURL: URL,
+		database: String = "telme",
+		user: String? = nil,
+		password: String? = nil,
+		asyncInsert: Bool = true,
+		waitForAsyncInsert: Bool = true,
+		session: URLSession = .shared
+	) {
 		self.baseURL = baseURL
 		self.database = database
 		self.session = session
+		self.asyncInsert = asyncInsert
+		self.waitForAsyncInsert = waitForAsyncInsert
 		if let user, let password, !user.isEmpty {
 			let cred = "\(user):\(password)"
 			let data = cred.data(using: .utf8)!
@@ -83,6 +95,8 @@ final class ClickHouseClient: @unchecked Sendable {
 		comp.queryItems = [
 			URLQueryItem(name: "query", value: "INSERT INTO \(table) FORMAT JSONEachRow"),
 			URLQueryItem(name: "database", value: database),
+			URLQueryItem(name: "async_insert", value: asyncInsert ? "1" : "0"),
+			URLQueryItem(name: "wait_for_async_insert", value: waitForAsyncInsert ? "1" : "0"),
 		]
 		return comp.url!
 	}
