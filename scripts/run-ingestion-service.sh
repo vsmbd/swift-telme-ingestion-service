@@ -1,0 +1,34 @@
+#!/usr/bin/env bash
+
+set -euo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+PROJECT_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
+
+PORT="${PORT:-8080}"
+CLICKHOUSE_DSN="${CLICKHOUSE_DSN:-http://127.0.0.1:8123}"
+CLICKHOUSE_USER="${CLICKHOUSE_USER:-default}"
+CLICKHOUSE_PASSWORD="${CLICKHOUSE_PASSWORD:-.}"
+CLICKHOUSE_ASYNC_INSERT="${CLICKHOUSE_ASYNC_INSERT:-1}"
+CLICKHOUSE_WAIT_FOR_ASYNC_INSERT="${CLICKHOUSE_WAIT_FOR_ASYNC_INSERT:-1}"
+
+BUILD_FIRST="${BUILD_FIRST:-1}"
+
+cd "${PROJECT_ROOT}"
+
+if [[ "${BUILD_FIRST}" == "1" ]]; then
+  echo "Building TelmeIngestionService..."
+  swift build
+fi
+
+echo "Starting TelmeIngestionService on port ${PORT}"
+echo "ClickHouse DSN: ${CLICKHOUSE_DSN}"
+
+exec env \
+  PORT="${PORT}" \
+  CLICKHOUSE_DSN="${CLICKHOUSE_DSN}" \
+  CLICKHOUSE_USER="${CLICKHOUSE_USER}" \
+  CLICKHOUSE_PASSWORD="${CLICKHOUSE_PASSWORD}" \
+  CLICKHOUSE_ASYNC_INSERT="${CLICKHOUSE_ASYNC_INSERT}" \
+  CLICKHOUSE_WAIT_FOR_ASYNC_INSERT="${CLICKHOUSE_WAIT_FOR_ASYNC_INSERT}" \
+  .build/debug/TelmeIngestionService
